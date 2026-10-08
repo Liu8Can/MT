@@ -37,7 +37,7 @@ def verify(proxy):
     }
     start_time = time.time()
     try:
-        response = requests.get(target_url, headers=headers, proxies=proxies, timeout=20)
+        response = requests.get(target_url, headers=headers, proxies=proxies, timeout=(5, 8))
         return proxy, response.ok, int((time.time() - start_time) * 1000)
     except:
         return proxy, False, -1
@@ -77,7 +77,7 @@ def load():
                 myset.add(ip)
     except Exception as e:
         pass
-    with ThreadPoolExecutor(max_workers=30) as executor:
+    with ThreadPoolExecutor(max_workers=12) as executor:
         futures = [executor.submit(verify, proxy) for proxy in myset]
         for future in as_completed(futures):
             proxy, is_valid, requestTime = future.result()
@@ -89,7 +89,7 @@ def load():
         logger.info(f"{index}: {proxy} - {req_time}ms")
         IP_LIST[proxy] = True
 
-def checkIn(user, pwd, ip):
+def checkIn(user, pwd, ip=None):
     global hasE
     req = requests.session()
     req.headers.update(headers)
@@ -97,11 +97,15 @@ def checkIn(user, pwd, ip):
         'http': f'http://{ip}',
         'https': f'http://{ip}'
     }
-    req.proxies = proxies
+    req.trust_env = False
+    if ip:
+        req.proxies = proxies
+    else:
+        proxies = {}
     logger.info(f"{format_username(user)} 开始签到")
     try:
         url = 'https://bbs.binmt.cc/member.php?mod=logging&action=login&infloat=yes&handlekey=login&inajax=1&ajaxtarget=fwin_content_login'
-        resp = req.get(url, proxies=proxies, timeout=20)
+        resp = req.get(url, proxies=proxies, timeout=(6, 12))
         resp.encoding = resp.apparent_encoding
         if resp.ok:
             content = resp.text
@@ -118,24 +122,25 @@ def checkIn(user, pwd, ip):
                 'answer': '',
                 'agreebbrule': ''
             }
-            resp = req.post(url, data=data, proxies=proxies, timeout=20)
+            resp = req.post(url, data=data, proxies=proxies, timeout=(6, 12))
             resp.encoding = resp.apparent_encoding
             if resp.ok:
                 if '失败' in resp.text:
-                    del accounts_list[user]
+                    # Keep the account pending so the run reports failure.
+                    
                     logger.warning(f"{format_username(user)}: 密码错误")
                     hasE = True
-                    return
+                    return False
                 url = 'https://bbs.binmt.cc/k_misign-sign.html'
-                resp = req.get(url, proxies=proxies, timeout=20)
+                resp = req.get(url, proxies=proxies, timeout=(6, 12))
                 resp.encoding = resp.apparent_encoding
                 _formhash = formhash(resp.text)
                 code = resp.status_code
-                if resp.ok:
+                if resp.ok and _formhash:
                     url = f'https://bbs.binmt.cc/plugin.php?id=k_misign:sign&operation=qiandao&format=text&formhash={_formhash}'
-                    resp = req.get(url, proxies=proxies, timeout=20)
+                    resp = req.get(url, proxies=proxies, timeout=(6, 12))
                     resp.encoding = resp.apparent_encoding
-                    if '已签' in resp.text:
+                    if resp.ok and ('已签' in resp.text or '签到成功' in resp.text):
                         del accounts_list[user]
                         logger.info(CDATA(resp.text))
                         prefs.put(user, prefs.getTime())
@@ -143,7 +148,8 @@ def checkIn(user, pwd, ip):
                     logger.warning(CDATA(resp.text))
     except Exception as e:
         logger.warning(f"异常: {str(e)}")
-        IP_LIST[ip] = False
+        if ip:
+            IP_LIST[ip] = False
     return False
 
 def loginhash(data):
@@ -183,20 +189,29 @@ def start():
             accounts_list[username] = password
         elif YiQianDao:
             logger.info(f"{format_username(username)} 今日已签, 跳过签到")
+    if not accounts_list:
+        logger.info("没有待签到账号")
+        return True
+    # First try direct; only test proxies if a direct request fails.
+    keys = list(accounts_list.keys())
+    for i, username in enumerate(keys):
+        if checkIn(username, accounts_list[username]):
+            continue
+        if not IP_LIST:
+            load()
+        for proxy, status in IP_LIST.items():
+            if not status:
+                continue
+            if checkIn(username, accounts_list[username], proxy):
+                break
+        if i < len(keys) - 1:
+            time.sleep(3)
     if accounts_list:
-        load()
-    if IP_LIST:
-        keys = list(accounts_list.keys())
-        total = len(keys)
-        for i, username in enumerate(keys):
-            for proxy, status in IP_LIST.items():
-                if not status: continue
-                try:
-                    if checkIn(username, accounts_list[username], proxy): break
-                except:
-                    pass
-            if i < total - 1:
-                time.sleep(3)
-start()
+        logger.error("签到未完成，失败账号数：%d", len(accounts_list))
+        return False
+    return True
+
+success = start()
 prefs.save()
-if hasE: exit(1)
+if hasE or not success:
+    raise SystemExit(1)
