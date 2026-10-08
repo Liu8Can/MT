@@ -89,31 +89,38 @@ def load():
         logger.info(f"{index}: {proxy} - {req_time}ms")
         IP_LIST[proxy] = True
 
+def diagnostic(stage, response):
+    # Never log raw HTML, credentials, cookies, formhash, or redirect URLs.
+    logger.info("%s: HTTP %s, type=%s, bytes=%s, redirected=%s",
+                stage, response.status_code,
+                response.headers.get("Content-Type", "unknown").split(";")[0],
+                len(response.content), bool(response.history))
+
+
 def checkIn(user, pwd, ip=None):
     global hasE
-    req = requests.session()
-    req.headers.update(headers)
-    proxies = {
-        'http': f'http://{ip}',
-        'https': f'http://{ip}'
-    }
-    req.trust_env = False
-    if ip:
-        req.proxies = proxies
-    else:
-        proxies = {}
-    logger.info(f"{format_username(user)} 开始签到")
-    try:
-        url = 'https://bbs.binmt.cc/member.php?mod=logging&action=login&infloat=yes&handlekey=login&inajax=1&ajaxtarget=fwin_content_login'
-        resp = req.get(url, proxies=proxies, timeout=(6, 12))
-        resp.encoding = resp.apparent_encoding
-        if resp.ok:
-            content = resp.text
-            _loginhash = loginhash(content)
-            _formhash = formhash(content)
-            url = f'https://bbs.binmt.cc/member.php?mod=logging&action=login&loginsubmit=yes&handlekey=login&loginhash={_loginhash}&inajax=1'
+    with requests.Session() as req:
+        req.trust_env = False
+        req.headers.update(headers)
+        logger.info("%s 使用 GitHub Actions 直连签到", format_username(user))
+        try:
+            url = 'https://bbs.binmt.cc/member.php?mod=logging&action=login&infloat=yes&handlekey=login&inajax=1&ajaxtarget=fwin_content_login'
+            resp = req.get(url, timeout=(12, 30))
+            diagnostic("获取登录表单", resp)
+            if not resp.ok:
+                return False
+            resp.encoding = resp.apparent_encoding
+            login_token = loginhash(resp.text)
+            form_token = formhash(resp.text)
+            logger.info("登录表单解析: loginhash=%s, formhash=%s",
+                        bool(login_token), bool(form_token))
+            if not login_token or not form_token:
+                logger.warning("登录表单缺少必要字段，可能是页面结构变化或访问限制")
+                return False
+
+            url = f'https://bbs.binmt.cc/member.php?mod=logging&action=login&loginsubmit=yes&handlekey=login&loginhash={login_token}&inajax=1'
             data = {
-                'formhash': _formhash,
+                'formhash': form_token,
                 'referer': 'https://bbs.binmt.cc/k_misign-sign.html',
                 'fastloginfield': 'username',
                 'username': user,
@@ -122,35 +129,47 @@ def checkIn(user, pwd, ip=None):
                 'answer': '',
                 'agreebbrule': ''
             }
-            resp = req.post(url, data=data, proxies=proxies, timeout=(6, 12))
+            resp = req.post(url, data=data, timeout=(12, 30))
+            diagnostic("提交登录", resp)
+            if not resp.ok:
+                return False
             resp.encoding = resp.apparent_encoding
-            if resp.ok:
-                if '失败' in resp.text:
-                    # Keep the account pending so the run reports failure.
-                    
-                    logger.warning(f"{format_username(user)}: 密码错误")
-                    hasE = True
-                    return False
-                url = 'https://bbs.binmt.cc/k_misign-sign.html'
-                resp = req.get(url, proxies=proxies, timeout=(6, 12))
-                resp.encoding = resp.apparent_encoding
-                _formhash = formhash(resp.text)
-                code = resp.status_code
-                if resp.ok and _formhash:
-                    url = f'https://bbs.binmt.cc/plugin.php?id=k_misign:sign&operation=qiandao&format=text&formhash={_formhash}'
-                    resp = req.get(url, proxies=proxies, timeout=(6, 12))
-                    resp.encoding = resp.apparent_encoding
-                    if resp.ok and ('已签' in resp.text or '签到成功' in resp.text):
-                        del accounts_list[user]
-                        logger.info(CDATA(resp.text))
-                        prefs.put(user, prefs.getTime())
-                        return True
-                    logger.warning(CDATA(resp.text))
-    except Exception as e:
-        logger.warning(f"异常: {str(e)}")
-        if ip:
-            IP_LIST[ip] = False
-    return False
+            if '失败' in resp.text:
+                logger.error("%s 登录响应包含失败提示（未判定为密码错误）", format_username(user))
+                hasE = True
+                return False
+
+            resp = req.get('https://bbs.binmt.cc/k_misign-sign.html', timeout=(12, 30))
+            diagnostic("读取签到页", resp)
+            if not resp.ok:
+                return False
+            resp.encoding = resp.apparent_encoding
+            sign_token = formhash(resp.text)
+            logger.info("签到页解析: formhash=%s", bool(sign_token))
+            if not sign_token:
+                logger.warning("签到页缺少 formhash，可能未登录或页面结构变化")
+                return False
+
+            url = f'https://bbs.binmt.cc/plugin.php?id=k_misign:sign&operation=qiandao&format=text&formhash={sign_token}'
+            resp = req.get(url, timeout=(12, 30))
+            diagnostic("执行签到", resp)
+            if not resp.ok:
+                return False
+            resp.encoding = resp.apparent_encoding
+            result = CDATA(resp.text) or resp.text
+            if '已签' in result or '签到成功' in result:
+                accounts_list.pop(user, None)
+                prefs.put(user, prefs.getTime())
+                logger.info("%s 今日签到已确认", format_username(user))
+                return True
+            logger.warning("签到响应未包含已知成功标志，响应长度=%s", len(resp.content))
+            return False
+        except requests.RequestException as exc:
+            logger.warning("直连请求失败: %s: %s", type(exc).__name__, str(exc).split("url:")[0][:180])
+            return False
+        except Exception as exc:
+            logger.exception("签到程序异常: %s", type(exc).__name__)
+            return False
 
 def loginhash(data):
     pattern = r'loginhash.*?=(.*?)[\'"]>'
@@ -192,18 +211,11 @@ def start():
     if not accounts_list:
         logger.info("没有待签到账号")
         return True
-    # First try direct; only test proxies if a direct request fails.
+    # Direct-only: no untrusted public proxy pool.
     keys = list(accounts_list.keys())
     for i, username in enumerate(keys):
-        if checkIn(username, accounts_list[username]):
-            continue
-        if not IP_LIST:
-            load()
-        for proxy, status in IP_LIST.items():
-            if not status:
-                continue
-            if checkIn(username, accounts_list[username], proxy):
-                break
+        if not checkIn(username, accounts_list[username]):
+            logger.error("%s 本次签到失败", format_username(username))
         if i < len(keys) - 1:
             time.sleep(3)
     if accounts_list:
