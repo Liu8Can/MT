@@ -30,6 +30,10 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         
+    - name: 只读诊断论坛页面（不登录、不签到）
+      continue-on-error: true
+      run: python diagnose_mt.py
+
     - name: 运行签到
       env:
         ACCOUNTS: ${{ secrets.ACCOUNTS }}
