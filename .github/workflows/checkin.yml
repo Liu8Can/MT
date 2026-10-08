@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 0,12 * * *'
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'prefs.sqlite'
 
 jobs:
   checkin:
@@ -30,6 +35,7 @@ jobs:
         ACCOUNTS: ${{ secrets.ACCOUNTS }}
       run: python main.py
     - name: Empty commit
+      if: github.event_name != 'push'
       run: |
         git config user.name "github-actions" >/dev/null 2>&1
         git config user.email "github-actions@github.com" >/dev/null 2>&1
