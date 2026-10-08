@@ -85,10 +85,10 @@ def inspect(session, name, path):
         parsed = urlsplit(response.url)
         destination = "same-host" if parsed.hostname == HOST else "other-host"
         matches = {key: any(w in body.lower() for w in words) for key, words in KEYWORDS.items()}
-        legacy_login = bool(re.search(r"loginhash.*?=(.*?)[\\'\\\"]>", body, re.I))
-        legacy_form = bool(re.search(r"formhash[\\'\\\"].*?value=[\\'\\\"](.*?)[\\'\\\"].*?/>", body, re.I))
-        generic_login = bool(re.search(r"loginhash\\s*[=:]\\s*['\\\"]?\\w+", body, re.I))
-        generic_form = bool(re.search(r"name\\s*=\\s*['\\\"]formhash['\\\"]", body, re.I))
+        legacy_login = bool(re.search("loginhash.*?=", body, re.I))
+        legacy_form = bool(re.search("formhash.*?value=", body, re.I | re.S))
+        generic_login = "loginhash" in body.lower()
+        generic_form = "formhash" in body.lower()
         print(f"[{name}] status={response.status_code} seconds={elapsed} bytes={len(raw)} "
               f"content_type={response.headers.get('Content-Type','').split(';')[0]} "
               f"redirects={len(response.history)} destination={destination}")
